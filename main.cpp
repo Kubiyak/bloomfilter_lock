@@ -46,6 +46,8 @@ struct task
         reads.push_back(resource1);
         writes.push_back(resource2);
 
+        bloomfilter_lock::LockIntention intention(reads, writes);
+        
         // Wait for go...
         std::unique_lock<std::mutex> l(m_mutex);
         while (!m_run)
@@ -60,7 +62,7 @@ struct task
 
         for (auto i = 0; i < count; ++i)
         {
-            m_bloomfilter_lock.multilock(reads, writes);
+            m_bloomfilter_lock.multilock(intention);
             m_bloomfilter_lock.unlock();
             m_bloomfilter_lock.global_read_lock();
             m_bloomfilter_lock.unlock();
@@ -80,7 +82,9 @@ struct task
 int main()
 {
     bloomfilter_lock::BloomFilterLock l;
-    size_t concurrency = std::thread::hardware_concurrency();
+    auto num_cores = std::thread::hardware_concurrency();
+    
+    size_t concurrency = num_cores > 2 ? num_cores - 1 : num_cores;
     //size_t concurrency = 2;
     std::mutex m;
     std::condition_variable v;

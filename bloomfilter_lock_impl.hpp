@@ -10,7 +10,7 @@
 namespace bloomfilter_lock
 {
     
-    bool _LockRecord::merge_lock_request(const _LockIntention& l)
+    bool _LockRecord::merge_lock_request(const LockIntention& l)
     {
         // a count of 0 is guaranteed accurate.
         if (m_record_type == ReadOnly)
@@ -42,13 +42,13 @@ namespace bloomfilter_lock
 
     bool _LockRecord::merge_read_lock_request(Key id)
     {
-        return merge_lock_request(_LockIntention({id}, {Key(0)}));
+        return merge_lock_request(LockIntention({id}, {Key(0)}));
     }
 
     
     bool _LockRecord::merge_write_lock_request(Key id)
     {
-        return merge_lock_request(_LockIntention({id}, {id}));
+        return merge_lock_request(LockIntention({id}, {id}));
     }
 
         
@@ -158,10 +158,13 @@ namespace bloomfilter_lock
     template<typename T>
     void BloomFilterLock::multilock(const T& reads, const T& writes)
     {
-        tl_existing_locks.track(this);
+        multilock(LockIntention(reads, writes));   
+    }
 
-        _LockIntention l(reads, writes);
-        
+    
+    void BloomFilterLock::multilock(const LockIntention& l)
+    {
+        tl_existing_locks.track(this);
         std::unique_lock<std::mutex> lock(m_mutex);
         if (m_lock_queue.front()->merge_lock_request(l))
         {
@@ -171,10 +174,10 @@ namespace bloomfilter_lock
 
         _LockRecord *r = allocate_lock_record();
         r->merge_lock_request(l);
-        wait_at_queue_back(lock, r);
+        wait_at_queue_back(lock, r);    
     }
-
-
+    
+    
     void BloomFilterLock::read_lock(Key resource_id)
     {
         tl_existing_locks.track(this);

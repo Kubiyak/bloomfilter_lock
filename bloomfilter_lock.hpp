@@ -43,7 +43,7 @@ namespace bloomfilter_lock
      */
     class BloomFilterLock;
     class _LockRecord;
-    class _LockIntention;
+    class LockIntention;
     
     class Key
     {
@@ -68,7 +68,7 @@ namespace bloomfilter_lock
     private:
         friend class BloomFilterLock;
         friend class _LockRecord;
-        friend class _LockIntention;
+        friend class LockIntention;
         Key(const Key& input, uint8_t prefix_length):
         m_ui32(input.m_ui32)
         {
@@ -88,9 +88,9 @@ namespace bloomfilter_lock
 
     
     // Tracks intention to lock a set of resources in a series of bits.    
-    struct _LockIntention
+    struct LockIntention
     {
-        _LockIntention():
+        LockIntention():
             m_read_indicators(),
             m_write_indicators(),
             m_exclusive_read_indicators(),
@@ -102,14 +102,14 @@ namespace bloomfilter_lock
         }
         
         template<typename T>
-        _LockIntention(const T& reads, const T& writes):
-            _LockIntention()
+        LockIntention(const T& reads, const T& writes):
+            LockIntention()
         {
             set(reads, writes);
         }
         
-        _LockIntention(const std::initializer_list<Key>& reads, const std::initializer_list<Key>& writes):
-            _LockIntention()
+        LockIntention(const std::initializer_list<Key>& reads, const std::initializer_list<Key>& writes):
+            LockIntention()
         {
             set(reads, writes);
         }
@@ -151,7 +151,7 @@ namespace bloomfilter_lock
             }            
         }
         
-        _LockIntention(const _LockIntention& rhs) = default;
+        LockIntention(const LockIntention& rhs) = default;
         
         void clear()
         {
@@ -199,7 +199,7 @@ namespace bloomfilter_lock
         }
         
         
-        bool merge(const _LockIntention& rhs)
+        bool merge(const LockIntention& rhs)
         {
             // Merging with self is an error.
             if (&rhs == this)
@@ -229,14 +229,14 @@ namespace bloomfilter_lock
             return true;
         }
         
-        static _LockIntention from_read_key(Key key)
+        static LockIntention from_read_key(Key key)
         {
-            return _LockIntention({key}, {Key(0)});            
+            return LockIntention({key}, {Key(0)});            
         }
         
-        static _LockIntention from_write_key(Key key)
+        static LockIntention from_write_key(Key key)
         {
-            return _LockIntention({Key(0)}, {key});
+            return LockIntention({Key(0)}, {key});
         }
                 
         size_t m_read_indicators[4];
@@ -277,7 +277,7 @@ namespace bloomfilter_lock
         {
         }
 
-        bool merge_lock_request(const _LockIntention& l);
+        bool merge_lock_request(const LockIntention& l);
 
         bool global_write_request()
         {
@@ -334,8 +334,8 @@ namespace bloomfilter_lock
             }
         }
 
-        void _wait_impl(std::unique_lock<std::mutex>& guard)
-        {
+        void _wait_impl(std::unique_lock<std::mutex>& guard, bool spin = false)
+        {            
             while(!(m_active || m_closing))
                 m_condition.wait(guard);
             
@@ -356,12 +356,12 @@ namespace bloomfilter_lock
         }
         
         
-        void wait(bool latch = true)
+        void wait(bool latch = true, bool spin = false)
         {
             std::unique_lock<std::mutex> guard(m_mutex);
             if (latch)
                 ++m_num_waiting;
-            _wait_impl(guard);
+            _wait_impl(guard, spin);
         }
         
         bool release()
@@ -401,7 +401,7 @@ namespace bloomfilter_lock
         size_t m_num_locking;
         size_t m_num_requests;
         RecordType m_record_type;
-        _LockIntention m_lock_intention;
+        LockIntention m_lock_intention;
         bool m_active;
         bool m_closing;
 
@@ -476,6 +476,7 @@ namespace bloomfilter_lock
         void global_write_lock();
         template <typename T>
         void multilock(const T& reads, const T& writes);
+        void multilock(const LockIntention& l);
         void read_lock(Key readKey);
         void write_lock(Key writeKey);
         void unlock();
