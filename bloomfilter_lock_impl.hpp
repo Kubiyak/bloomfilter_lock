@@ -4,52 +4,51 @@
  * Released under the terms of the MIT License: https://opensource.org/licenses/MIT
  ***************************************************************************************************/
 
+#include "bloomfilter_lock.hpp"
+
+
 namespace bloomfilter_lock
 {
-    template<typename T>
-    bool _LockRecord::merge_lock_request(const T& reads, const T& writes)
+    
+    bool _LockRecord::merge_lock_request(const _LockIntention& l)
     {
-
+        // a count of 0 is guaranteed accurate.
         if (m_record_type == ReadOnly)
-            return !writes.size();
-
+            return l.m_min_writes == 0;
+    
         if (m_record_type == None)
         {
             m_record_type = ReadWrite;
             m_num_requests = 1;
-            m_lock_intention.set(reads, writes);
+            m_lock_intention = l;
             return true;
         }
-
+    
         if (m_record_type == Exclusive)
             return false;
-
-        // Probability of a failed merge is very high if there are many write requests.
-        if (writes.size() > 8)
-        {
+    
+        if (l.m_min_writes > 8)
             return false;
-        }
-
-        if (not m_lock_intention.merge(reads, writes))
+        
+        if (not m_lock_intention.merge(l))
             return false;
         
         m_num_requests += 1;
         if (m_num_requests > 8)
             m_record_type = Exclusive;
-        
         return true;
     }
-
+    
 
     bool _LockRecord::merge_read_lock_request(Key id)
     {
-        return merge_lock_request({id}, {Key(0)});
+        return merge_lock_request(_LockIntention({id}, {Key(0)}));
     }
 
     
     bool _LockRecord::merge_write_lock_request(Key id)
     {
-        return merge_lock_request({id}, {id});
+        return merge_lock_request(_LockIntention({id}, {id}));
     }
 
         
@@ -161,15 +160,17 @@ namespace bloomfilter_lock
     {
         tl_existing_locks.track(this);
 
+        _LockIntention l(reads, writes);
+        
         std::unique_lock<std::mutex> lock(m_mutex);
-        if (m_lock_queue.front()->merge_lock_request(reads, writes))
+        if (m_lock_queue.front()->merge_lock_request(l))
         {
             wait_at_queue_front(lock);
             return;
         }
 
         _LockRecord *r = allocate_lock_record();
-        r->merge_lock_request(reads, writes);
+        r->merge_lock_request(l);
         wait_at_queue_back(lock, r);
     }
 

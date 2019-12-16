@@ -94,7 +94,9 @@ namespace bloomfilter_lock
             m_read_indicators(),
             m_write_indicators(),
             m_exclusive_read_indicators(),
-            m_exclusive_write_indicators()                
+            m_exclusive_write_indicators(),
+            m_min_reads(0),
+            m_min_writes(0)
         {
             
         }
@@ -120,6 +122,7 @@ namespace bloomfilter_lock
                 if (key.m_ui32 == 0)
                     continue;
                 
+                m_min_reads += 1;
                 for(auto i = 0; i < 4; ++i)
                 {
                     m_read_indicators[i] |= (size_t(1) << (key.m_ui8[i] & 0x3F));
@@ -133,6 +136,8 @@ namespace bloomfilter_lock
                 if (key.m_ui32 == 0)
                     continue;
                 
+                m_min_reads += 1;
+                m_min_writes += 1;
                 for(auto i = 0; i < 4; ++i)
                 {
                     m_write_indicators[i] |= (size_t(1) << (key.m_ui8[i] & 0x3F));
@@ -156,6 +161,8 @@ namespace bloomfilter_lock
                 m_write_indicators[i] = 0;
                 m_exclusive_read_indicators[i] = false;
                 m_exclusive_write_indicators[i] = false;
+                m_min_reads = 0;
+                m_min_writes = 0;
             }    
         }
                        
@@ -191,12 +198,6 @@ namespace bloomfilter_lock
             return false;
         }
         
-        template <typename T>
-        bool merge(const T& reads, const T& writes)
-        {
-            _LockIntention l(reads, writes);
-            return merge(l);
-        }
         
         bool merge(const _LockIntention& rhs)
         {
@@ -223,6 +224,8 @@ namespace bloomfilter_lock
                 if (rhs.m_exclusive_write_indicators[0])
                     m_exclusive_write_indicators[i] = (m_exclusive_write_indicators[i] && rhs.m_exclusive_write_indicators[i]);
             }
+            m_min_reads += rhs.m_min_reads;
+            m_min_writes += rhs.m_min_writes;
             return true;
         }
         
@@ -240,6 +243,12 @@ namespace bloomfilter_lock
         size_t m_write_indicators[4];
         bool m_exclusive_read_indicators[4];
         bool m_exclusive_write_indicators[4];
+        
+        // Min read and write counts based on number of keys at construction time.
+        // merge adds values from merged element. Note that these are min bounds. The total number of
+        // intended reads and writes can be higher
+        size_t m_min_reads;
+        size_t m_min_writes;
     };
     
     
@@ -268,14 +277,8 @@ namespace bloomfilter_lock
         {
         }
 
-        template <typename T>
-        bool merge_lock_request(const T& read_requests, const T& write_requests);
+        bool merge_lock_request(const _LockIntention& l);
 
-        bool merge_lock_request(const std::initializer_list<Key>& reads, const std::initializer_list<Key>& writes)
-        {
-            return merge_lock_request<std::initializer_list<Key>>(reads, writes);
-        }
-        
         bool global_write_request()
         {
             if (m_record_type == None)
@@ -351,6 +354,7 @@ namespace bloomfilter_lock
             // In that limited context a lock is not needed to update this count.
             ++m_num_waiting;
         }
+        
         
         void wait(bool latch = true)
         {

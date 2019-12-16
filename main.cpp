@@ -64,13 +64,15 @@ struct task
             m_bloomfilter_lock.unlock();
             m_bloomfilter_lock.global_read_lock();
             m_bloomfilter_lock.unlock();
+            m_bloomfilter_lock.global_read_lock();
+            m_bloomfilter_lock.unlock();
         }
 
         hres_t vi_end = std::chrono::high_resolution_clock::now ();
         duration_t timespan = std::chrono::duration_cast<duration_t> (vi_end - vi_start);
 
         l.lock();
-        fprintf(stderr, "Time for %ld lock cycles: %ld micro-seconds\n", count*2, timespan.count());
+        fprintf(stderr, "Time for %ld lock cycles: %ld micro-seconds\n", count*3, timespan.count());
     }
 };
 
