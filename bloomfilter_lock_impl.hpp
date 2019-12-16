@@ -53,7 +53,7 @@ namespace bloomfilter_lock
 
         
     BloomFilterLock::BloomFilterLock():
-        m_active_lock_record(0)
+        m_active_lock_record(nullptr)
     {
         for (auto i = 0; i < 7; i++)
         {
@@ -83,10 +83,12 @@ namespace bloomfilter_lock
             delete r;
         }
 
-        if (m_active_lock_record)
+        auto lock_record = m_active_lock_record;
+        if (lock_record)
         {
-            m_active_lock_record->close();
-            delete m_active_lock_record;
+            m_active_lock_record = nullptr;
+            lock_record->close();            
+            delete lock_record;
         }
 
         for (auto r : m_record_pool)
@@ -214,31 +216,35 @@ namespace bloomfilter_lock
     void BloomFilterLock::unlock()
     {
         tl_existing_locks.untrack(this);
-
-        if (m_active_lock_record->release())
+        auto released_lock_record = m_active_lock_record;
+        if (not released_lock_record)
+        {
+            std::cerr << "Active lock record unexpectedly not there!" << std::endl;
+            std::terminate();
+        }
+        
+        if (released_lock_record->release())
         {
             // This thread is responsible for clearing the lock record and activating the next one.
-
-            m_active_lock_record->clear();
-            _LockRecord* old_active_record = m_active_lock_record;
-
-            std::unique_lock<std::mutex> lock(m_mutex);
-            m_active_lock_record = 0;
+            std::unique_lock<std::mutex> lock(m_mutex);        
+            released_lock_record->clear();                                        
+            m_active_lock_record = nullptr;
 
             if (!m_lock_queue.empty())
             {
                 if (m_lock_queue.front()->record_type() != _LockRecord::None)
                 {
-                    m_active_lock_record = m_lock_queue.front();
+                    auto lock_record = m_lock_queue.front();
                     m_lock_queue.pop();
-                    m_active_lock_record->activate();
+                    m_active_lock_record = lock_record;
+                    lock_record->activate();
                 }
             }
 
             if (m_lock_queue.empty())
-                m_lock_queue.push(old_active_record);           
+                m_lock_queue.push(released_lock_record);           
             else
-                m_record_pool.push_back(old_active_record);
+                m_record_pool.push_back(released_lock_record);
         }
     }
 
