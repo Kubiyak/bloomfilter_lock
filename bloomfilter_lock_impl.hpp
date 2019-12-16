@@ -7,7 +7,7 @@
 namespace bloomfilter_lock
 {
     template<typename T>
-    bool LockRecord::merge_lock_request(const T& reads, const T& writes)
+    bool _LockRecord::merge_lock_request(const T& reads, const T& writes)
     {
 
         if (m_record_type == ReadOnly)
@@ -18,6 +18,7 @@ namespace bloomfilter_lock
             m_record_type = ReadWrite;
             m_num_requests = 1;
             m_lock_intention.set(reads, writes);
+            return true;
         }
 
         if (m_record_type == Exclusive)
@@ -29,7 +30,7 @@ namespace bloomfilter_lock
             return false;
         }
 
-        if (not merge_lock_request(reads, writes))
+        if (not m_lock_intention.merge(reads, writes))
             return false;
         
         m_num_requests += 1;
@@ -40,13 +41,13 @@ namespace bloomfilter_lock
     }
 
 
-    bool LockRecord::merge_read_lock_request(Key id)
+    bool _LockRecord::merge_read_lock_request(Key id)
     {
         return merge_lock_request({id}, {Key(0)});
     }
 
     
-    bool LockRecord::merge_write_lock_request(Key id)
+    bool _LockRecord::merge_write_lock_request(Key id)
     {
         return merge_lock_request({id}, {id});
     }
@@ -57,9 +58,9 @@ namespace bloomfilter_lock
     {
         for (auto i = 0; i < 7; i++)
         {
-            m_record_pool.push_back(new LockRecord);
+            m_record_pool.push_back(new _LockRecord);
         }
-        m_lock_queue.push(new LockRecord);
+        m_lock_queue.push(new _LockRecord);
     }
 
 
@@ -76,7 +77,7 @@ namespace bloomfilter_lock
 
         while (!m_lock_queue.empty())
         {
-            LockRecord *r = m_lock_queue.front();
+            _LockRecord *r = m_lock_queue.front();
             r->close();
             m_lock_queue.pop();
             r->clear();
@@ -94,10 +95,10 @@ namespace bloomfilter_lock
     }
 
 
-    LockRecord* BloomFilterLock::allocate_lock_record()
+    _LockRecord* BloomFilterLock::allocate_lock_record()
     {
         // m_mutex must be held when calling this.
-        LockRecord *result = 0;
+        _LockRecord *result = 0;
         if (m_record_pool.size())
         {
             result = m_record_pool.back();
@@ -105,7 +106,7 @@ namespace bloomfilter_lock
         }
         else
         {
-            result = new LockRecord;
+            result = new _LockRecord;
         }
         return result;
     }
@@ -124,7 +125,16 @@ namespace bloomfilter_lock
             return;
         }
 
-        LockRecord *r = allocate_lock_record();
+        if (m_lock_queue.size() > 1)
+        {
+            if (m_lock_queue.back()->global_read_request())
+            {
+                wait_at_queue_back(lock);
+                return;
+            }
+        }
+        
+        _LockRecord *r = allocate_lock_record();
         wait_at_queue_back(lock, r);
     }
 
@@ -140,7 +150,7 @@ namespace bloomfilter_lock
             return;
         }
 
-        LockRecord *r = allocate_lock_record();
+        _LockRecord *r = allocate_lock_record();
         r->global_write_request();
         wait_at_queue_back(lock, r);
     }
@@ -158,7 +168,7 @@ namespace bloomfilter_lock
             return;
         }
 
-        LockRecord *r = allocate_lock_record();
+        _LockRecord *r = allocate_lock_record();
         r->merge_lock_request(reads, writes);
         wait_at_queue_back(lock, r);
     }
@@ -174,7 +184,8 @@ namespace bloomfilter_lock
             wait_at_queue_front(lock);
             return;
         }
-        LockRecord *r = allocate_lock_record();
+        
+        _LockRecord *r = allocate_lock_record();
         r->merge_read_lock_request(resource_id);
         wait_at_queue_back(lock, r);
     }
@@ -190,7 +201,7 @@ namespace bloomfilter_lock
             wait_at_queue_front(lock);
             return;
         }
-        LockRecord *r = allocate_lock_record();
+        _LockRecord *r = allocate_lock_record();
         r->merge_write_lock_request(resource_id);
         wait_at_queue_back(lock, r);
     }
@@ -205,14 +216,14 @@ namespace bloomfilter_lock
             // This thread is responsible for clearing the lock record and activating the next one.
 
             m_active_lock_record->clear();
-            LockRecord* old_active_record = m_active_lock_record;
+            _LockRecord* old_active_record = m_active_lock_record;
 
             std::unique_lock<std::mutex> lock(m_mutex);
             m_active_lock_record = 0;
 
             if (!m_lock_queue.empty())
             {
-                if (m_lock_queue.front()->record_type() != LockRecord::None)
+                if (m_lock_queue.front()->record_type() != _LockRecord::None)
                 {
                     m_active_lock_record = m_lock_queue.front();
                     m_lock_queue.pop();

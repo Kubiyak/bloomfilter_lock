@@ -8,6 +8,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <exception>
+#include <iostream>
 #include <mutex>
 #include <pthread.h>
 #include <sys/types.h>
@@ -34,9 +35,14 @@ namespace bloomfilter_lock
      * in this scheme is not expected to exceed 10. Because of the ability to lock entire swaths of locks with
      * the same key prefix with this convention, it is still possible to efficiently lock thousands of locks simultaneously
      * in this scheme.
+     * 
+     * Key(0) is a special value. It indicates a null locking request. It will not result in any locks being obtained.
+     * A random number key generation scheme should bitwise or the result of
+     * random number generation with 0x01 or some other bit which is present in 0x3F3F3F3F to guarantee the result is
+     * a valid key. Any key which bitwise ands with 0xC0C0C0C0 to a non-zero value maps to the 0 key.
      */
     class BloomFilterLock;
-    class LockRecord;
+    class _LockRecord;
     class _LockIntention;
     
     class Key
@@ -61,7 +67,7 @@ namespace bloomfilter_lock
             
     private:
         friend class BloomFilterLock;
-        friend class LockRecord;
+        friend class _LockRecord;
         friend class _LockIntention;
         Key(const Key& input, uint8_t prefix_length):
         m_ui32(input.m_ui32)
@@ -111,9 +117,12 @@ namespace bloomfilter_lock
         {
             for(auto key: reads)
             {
+                if (key.m_ui32 == 0)
+                    continue;
+                
                 for(auto i = 0; i < 4; ++i)
                 {
-                    m_read_indicators[i] |= (1 << (key.m_ui8[i] & 0x3F));
+                    m_read_indicators[i] |= (size_t(1) << (key.m_ui8[i] & 0x3F));
                     if (key.m_ui8[i] & 0x80)
                         m_exclusive_read_indicators[i] = true;
                 }   
@@ -121,10 +130,13 @@ namespace bloomfilter_lock
         
             for(auto key: writes)
             {
+                if (key.m_ui32 == 0)
+                    continue;
+                
                 for(auto i = 0; i < 4; ++i)
                 {
-                    m_write_indicators[i] |= (1 << (key.m_ui8[i] & 0x3F));
-                    m_read_indicators[i] |= (1 << (key.m_ui8[i] & 0x3F));
+                    m_write_indicators[i] |= (size_t(1) << (key.m_ui8[i] & 0x3F));
+                    m_read_indicators[i] |= (size_t(1) << (key.m_ui8[i] & 0x3F));
                     if (key.m_ui8[i] & 0x80)
                     {
                         m_exclusive_read_indicators[i] = true;
@@ -179,6 +191,13 @@ namespace bloomfilter_lock
             return false;
         }
         
+        template <typename T>
+        bool merge(const T& reads, const T& writes)
+        {
+            _LockIntention l(reads, writes);
+            return merge(l);
+        }
+        
         bool merge(const _LockIntention& rhs)
         {
             // Merging with self is an error.
@@ -227,7 +246,7 @@ namespace bloomfilter_lock
     /* LockRecord:
      * The main structure used to track the series of resources to be locked in a locking batch via a BloomFilterLock
      */
-    class LockRecord
+    class _LockRecord
     {
     public:
 
@@ -239,7 +258,7 @@ namespace bloomfilter_lock
             Exclusive = 3
         };
 
-        LockRecord() :
+        _LockRecord() :
             m_num_waiting(0),
             m_num_locking(0),
             m_active(false),
@@ -312,43 +331,42 @@ namespace bloomfilter_lock
             }
         }
 
-        void latch()
+        void _wait_impl(std::unique_lock<std::mutex>& guard)
         {
-            std::unique_lock<std::mutex> guard(m_mutex);
+            while(!(m_active || m_closing))
+                m_condition.wait(guard);
+            
+            --m_num_waiting;
+            if (m_closing)
+            {
+                std::cerr << "Severe error: BloomFilterLock has waiters while closing" << std::endl;
+                std::terminate();
+            }
+            ++m_num_locking;
+        }
+                
+        void _latch()
+        {
+            // This is called in a limited context in which a new LockRecord is obtained.
+            // In that limited context a lock is not needed to update this count.
             ++m_num_waiting;
         }
-
+        
         void wait(bool latch = true)
         {
             std::unique_lock<std::mutex> guard(m_mutex);
             if (latch)
                 ++m_num_waiting;
-            while (!(m_active || m_closing))
-            {
-                m_condition.wait(guard);
-            }
-
-            --m_num_waiting;
-
-            if (m_closing)
-            {
-                if (m_num_waiting == 0 && m_num_locking == 0)
-                    m_condition.notify_all();
-
-                // Object was destroyed while a waiter was waiting for lock. This indicates a serious
-                // logic error.
-                std::terminate();
-            }
-
-            ++m_num_locking;
+            _wait_impl(guard);
         }
-
+        
         bool release()
         {
             std::unique_lock<std::mutex> guard(m_mutex);
-            bool return_value = --m_num_locking == 0 && m_num_waiting == 0;
+            --m_num_locking;
+            bool return_value = (m_num_locking == 0 && m_num_waiting == 0);           
             
-            if (m_num_waiting > 0)
+            if (m_num_waiting)
                 m_condition.notify_all();
 
             // Returns true if the caller to release is responsible for freeing this LockRecord and activating the
@@ -460,11 +478,11 @@ namespace bloomfilter_lock
 
     private:
 
-        LockRecord *allocate_lock_record();
+        _LockRecord *allocate_lock_record();
         inline void wait_at_queue_front(std::unique_lock<std::mutex>& guard)
         {
-            LockRecord * r = m_lock_queue.front();
-            r->latch();
+            _LockRecord * r = m_lock_queue.front();
+            r->_latch();
 
             if (!m_active_lock_record)
             {
@@ -480,12 +498,20 @@ namespace bloomfilter_lock
             r->wait(false);
         }
 
-        inline void wait_at_queue_back(std::unique_lock<std::mutex>& guard, LockRecord * new_record)
+        inline void wait_at_queue_back(std::unique_lock<std::mutex>& guard, _LockRecord * new_record)
         {
-            new_record->latch();
+            new_record->_latch();
             m_lock_queue.push(new_record);
             guard.unlock();
             new_record->wait(false);
+        }
+        
+        inline void wait_at_queue_back(std::unique_lock<std::mutex>& guard)
+        {
+            auto queue_back = m_lock_queue.back();
+            queue_back->_latch();
+            guard.unlock();
+            queue_back->wait(false);
         }
 
         /* Track the set of resource locks held by each thread.  This is here to prevent an attempt to make a lock
@@ -495,9 +521,9 @@ namespace bloomfilter_lock
          */
         static thread_local _TLResourceTracker tl_existing_locks;
 
-        LockRecord *m_active_lock_record;
-        std::vector<LockRecord*> m_record_pool;
-        std::queue<LockRecord*> m_lock_queue;
+        _LockRecord *m_active_lock_record;
+        std::vector<_LockRecord*> m_record_pool;
+        std::queue<_LockRecord*> m_lock_queue;
         std::mutex m_mutex; // For locking recordPool and internal structures.
         bool m_closing; // Set to true during the destructor sequence.
     };

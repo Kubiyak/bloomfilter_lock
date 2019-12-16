@@ -10,7 +10,8 @@
 #include <random>
 #include <stdio.h>
 #include <thread>
-#include<bits/stdc++.h> 
+#include <bits/stdc++.h> 
+#include <cstdlib>
 
 typedef std::chrono::high_resolution_clock::time_point hres_t;
 typedef std::chrono::duration<size_t, std::ratio<1, 1000000>> duration_t; // micro-seconds.
@@ -34,11 +35,11 @@ struct task
     void operator()()
     {
         // Create some IDs for use with the lock.
-        std::default_random_engine generator;
+        std::default_random_engine generator(rand());
         std::uniform_int_distribution<int> distribution(1, INT_MAX);
-        auto resource1 = distribution(generator);
-        auto resource2 = distribution(generator);
-       
+        auto resource1 = distribution(generator) | 0x01; // the bitwise or is to ensure the generated key does not get mapped to 0
+        auto resource2 = distribution(generator) | 0x01;
+        
         std::vector<bloomfilter_lock::Key> reads;
         std::vector<bloomfilter_lock::Key> writes;
 
