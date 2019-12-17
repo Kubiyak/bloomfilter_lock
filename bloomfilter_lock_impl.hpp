@@ -3,7 +3,6 @@
  * A framework for scalable read/write locking.
  * Released under the terms of the MIT License: https://opensource.org/licenses/MIT
  ***************************************************************************************************/
-
 #include "bloomfilter_lock.hpp"
 
 
@@ -216,7 +215,15 @@ namespace bloomfilter_lock
     void BloomFilterLock::unlock()
     {        
         tl_existing_locks.untrack(this);
+        
+        // valgrind seems to fail to establish happens-before on the
+        // update to m_active_lock_record in a previous unlock op w/o
+        // this spinlock. From my understanding of happens-before, it should
+        // not strictly be necessary as happens-before for this is established
+        // by the spinlock held in the activate call itself.
+        std::unique_lock<_SpinLock> record_lock(m_active_lock_spinlock);
         auto released_lock_record = m_active_lock_record;
+        record_lock.unlock();
         
         if (released_lock_record->release())
         {
@@ -227,8 +234,12 @@ namespace bloomfilter_lock
             if (m_lock_queue.front()->record_type() != _LockRecord::None)
             {
                 auto lock_record = m_lock_queue.front();
-                m_lock_queue.pop();
-                m_active_lock_record = lock_record;                
+                m_lock_queue.pop();      
+                {                    
+                    record_lock.lock();
+                    m_active_lock_record = lock_record;
+                    record_lock.unlock();
+                }
                 lock_record->activate();
             }
 

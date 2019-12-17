@@ -24,6 +24,13 @@
 namespace bloomfilter_lock
 {
 
+    class BloomFilterLock;
+    class _LockRecord;
+    class LockIntention;    
+    
+
+    class Key
+    {
     /*
      * Key:
      * Identifies a range of the key space to lock.
@@ -45,12 +52,6 @@ namespace bloomfilter_lock
      * random number generation with 0x01 or some other bit which is present in 0x3F3F3F3F to guarantee the result is
      * a valid key. Any key which bitwise ands with 0xC0C0C0C0 to a non-zero value maps to the 0 key.
      */
-    class BloomFilterLock;
-    class _LockRecord;
-    class LockIntention;
-    
-    class Key
-    {
     public:
         Key(uint32_t key):
         m_ui32(key & 0x3F3F3F3F)
@@ -261,8 +262,13 @@ namespace bloomfilter_lock
         size_t m_min_writes;
     };
     
+    
     struct _FutexWrapper
     {
+    /* _FutexWrapper
+     * Wrapper around the FUTEX_WAIT and FUTEX_WAKE system calls. Will be
+     * switched to the wrappers in boost.sync when c++ modules are available.
+     */
         _FutexWrapper():
             m_futex(0) {}
     
@@ -276,21 +282,20 @@ namespace bloomfilter_lock
             while(1)
             {
                 int result = syscall(SYS_futex, &m_futex, FUTEX_WAIT_PRIVATE, 0, 0, 0, 0);
+                if (result == 0 && m_futex == 1)
+                    break;
+                
                 if (result == -1)
                 {
-                    if(errno == EAGAIN)
+                    if (errno == EAGAIN)
                     {
-                        if(m_futex == 1)
+                        if (m_futex == 1)
                             break;
-                        
                         continue;
                     }
-                    // Some other condition this cannot recover from
                     std::cerr << "Unexpected errno " << errno << " from futex_wait" << std::endl;
                     std::terminate();
-                }
-                if (m_futex == 1)
-                    break;
+                }                
             }
         }
         
@@ -316,10 +321,14 @@ namespace bloomfilter_lock
         int32_t m_futex;
     };
 
-    
-    // Simple spin lock based on c++ atomics
+        
     class _SpinLock
     {
+    /* _SpinLock
+     * Simple spin lock based on c++ atomics. The boost.sync library has
+     * similar functionality. The will be switched to the boost.sync version
+     * when c++ modules functionality is widely available.
+     */
     public:
         _SpinLock():
         m_lock(false)
@@ -342,11 +351,12 @@ namespace bloomfilter_lock
             std::atomic<bool> m_lock;
     };    
 
+
+    class _LockRecord
+    {
     /* LockRecord:
      * The main structure used to track the series of resources to be locked in a locking batch via a BloomFilterLock
      */
-    class _LockRecord
-    {
     public:
 
         enum RecordType
@@ -370,6 +380,8 @@ namespace bloomfilter_lock
 
         bool global_write_request()
         {
+            // This is always called under the mutex in BloomFilterLock
+            // Don't need to hold m_lock when updating.
             if (m_record_type == None)
             {
                 m_record_type = RecordType::Exclusive;
@@ -398,8 +410,11 @@ namespace bloomfilter_lock
         }
 
         void clear()
-        {
-            std::unique_lock<_SpinLock> guard(m_lock);
+        {          
+            // A lock is not needed on the clear step as the cleared record
+            // is queued back into the resource pool under the mutex in
+            // BloomFilterLock and then allocated and re-used under the same
+            // mutex and this is sufficient to establish happens-before
             m_num_waiting = 0;
             m_num_locking = 0;
             m_active = false;
@@ -415,9 +430,11 @@ namespace bloomfilter_lock
         }
 
         void activate()
-        {                        
-
-            std::unique_lock<_SpinLock> guard(m_lock);
+        {      
+            // Holding this lock while signalling the futex establishes
+            // happens-before on the state change m_futex = 0 -> 1 for the
+            // receiver of the futex signal.
+            std::unique_lock<_SpinLock> guard(m_lock);            
             if (!m_active)
             {
                 m_active = true;                
@@ -428,7 +445,6 @@ namespace bloomfilter_lock
         void _wait_impl()
         {                                        
             std::unique_lock<_SpinLock> guard(m_lock);
- 
             if (!m_active)
             {
                 guard.unlock();
@@ -460,9 +476,6 @@ namespace bloomfilter_lock
             }
             bool return_value = (num_locking == 0 && num_waiting == 0);           
             
-            // if (m_num_waiting)
-            //  m_futex.signal();
-
             // Returns true if the caller to release is responsible for freeing this LockRecord and activating the
             // next record in the lock queue.
             return return_value;
@@ -478,7 +491,6 @@ namespace bloomfilter_lock
         }
 
     private:
-
         size_t m_num_waiting;
         std::size_t m_num_locking;
         bool  m_active;
@@ -582,10 +594,7 @@ namespace bloomfilter_lock
             }
 
             guard.unlock();
-            r->wait();
-            
-            // TODO: investigate a better fence
-            while(m_active_lock_record != r) {}
+            r->wait();            
         }
 
         inline void wait_at_queue_back(std::unique_lock<std::mutex>& guard, _LockRecord * new_record)
@@ -595,7 +604,6 @@ namespace bloomfilter_lock
             guard.unlock();
             new_record->wait();
             
-            while (m_active_lock_record != new_record) {}
         }
         
         inline void wait_at_queue_back(std::unique_lock<std::mutex>& guard)
@@ -604,7 +612,7 @@ namespace bloomfilter_lock
             queue_back->_latch();
             guard.unlock();
             queue_back->wait();
-            while (m_active_lock_record != queue_back) {}
+            
         }
 
         /* Track the set of resource locks held by each thread.  This is here to prevent an attempt to make a lock
@@ -618,7 +626,8 @@ namespace bloomfilter_lock
         std::vector<_LockRecord*> m_record_pool;
         std::queue<_LockRecord*> m_lock_queue;
         std::mutex m_mutex; // For locking recordPool and internal structures.
-        bool m_closing; // Set to true during the destructor sequence.
+        _SpinLock m_active_lock_spinlock; // Apparently needed to establish causality for valgrind
+        bool m_closing; // Set to true during the destructor sequence.        
     };
 }
 

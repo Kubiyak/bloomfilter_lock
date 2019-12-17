@@ -57,7 +57,7 @@ struct task
 
         l.unlock();
 
-        size_t count = 1000000;
+        size_t count = 200000;
         hres_t vi_start = std::chrono::high_resolution_clock::now ();
 
         for (auto i = 0; i < count; ++i)
