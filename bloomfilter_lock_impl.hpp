@@ -214,31 +214,22 @@ namespace bloomfilter_lock
 
 
     void BloomFilterLock::unlock()
-    {
+    {        
         tl_existing_locks.untrack(this);
         auto released_lock_record = m_active_lock_record;
-        if (not released_lock_record)
-        {
-            std::cerr << "Active lock record unexpectedly not there!" << std::endl;
-            std::terminate();
-        }
         
         if (released_lock_record->release())
         {
-            // This thread is responsible for clearing the lock record and activating the next one.
-            std::unique_lock<std::mutex> lock(m_mutex);        
+            // This thread is responsible for clearing the lock record and activating the next one.                 
             released_lock_record->clear();                                        
-            m_active_lock_record = nullptr;
-
-            if (!m_lock_queue.empty())
+            std::unique_lock<std::mutex> guard(m_mutex);
+            m_active_lock_record = 0;
+            if (m_lock_queue.front()->record_type() != _LockRecord::None)
             {
-                if (m_lock_queue.front()->record_type() != _LockRecord::None)
-                {
-                    auto lock_record = m_lock_queue.front();
-                    m_lock_queue.pop();
-                    m_active_lock_record = lock_record;
-                    lock_record->activate();
-                }
+                auto lock_record = m_lock_queue.front();
+                m_lock_queue.pop();
+                m_active_lock_record = lock_record;                
+                lock_record->activate();
             }
 
             if (m_lock_queue.empty())

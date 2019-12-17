@@ -399,9 +399,10 @@ namespace bloomfilter_lock
 
         void clear()
         {
+            std::unique_lock<_SpinLock> guard(m_lock);
             m_num_waiting = 0;
             m_num_locking = 0;
-            m_active = 0;
+            m_active = false;
             m_record_type = None;           
             m_num_requests = 0;
             m_lock_intention.clear();
@@ -415,15 +416,12 @@ namespace bloomfilter_lock
 
         void activate()
         {                        
+
+            std::unique_lock<_SpinLock> guard(m_lock);
             if (!m_active)
             {
-                std::unique_lock<_SpinLock> guard(m_lock);
-                if (!m_active)
-                {
-                    m_active = true;
-                    guard.unlock();
-                    m_futex.signal();
-                }
+                m_active = true;                
+                m_futex.signal();
             }
         }
 
@@ -575,7 +573,7 @@ namespace bloomfilter_lock
                         
             if (!m_active_lock_record)
             {
-                m_active_lock_record = r;
+                m_active_lock_record = r;                
                 m_lock_queue.pop();
                 r->activate();
                 // The queue framework requires there to be a record in the queue at all times.
@@ -585,6 +583,9 @@ namespace bloomfilter_lock
 
             guard.unlock();
             r->wait();
+            
+            // TODO: investigate a better fence
+            while(m_active_lock_record != r) {}
         }
 
         inline void wait_at_queue_back(std::unique_lock<std::mutex>& guard, _LockRecord * new_record)
@@ -593,6 +594,8 @@ namespace bloomfilter_lock
             m_lock_queue.push(new_record);
             guard.unlock();
             new_record->wait();
+            
+            while (m_active_lock_record != new_record) {}
         }
         
         inline void wait_at_queue_back(std::unique_lock<std::mutex>& guard)
@@ -601,6 +604,7 @@ namespace bloomfilter_lock
             queue_back->_latch();
             guard.unlock();
             queue_back->wait();
+            while (m_active_lock_record != queue_back) {}
         }
 
         /* Track the set of resource locks held by each thread.  This is here to prevent an attempt to make a lock
