@@ -24,6 +24,7 @@
 namespace bloomfilter_lock
 {
 
+    template <typename T>
     class BloomFilterLock;
     class _LockRecord;
     class LockIntention;    
@@ -71,7 +72,10 @@ namespace bloomfilter_lock
         }
             
     private:
+        
+        template <typename T>
         friend class BloomFilterLock;
+        
         friend class _LockRecord;
         friend class LockIntention;
         Key(const Key& input, uint8_t prefix_length):
@@ -504,6 +508,7 @@ namespace bloomfilter_lock
     };
 
     
+    template <typename T>
     class _TLResourceTracker
     {
         // Keeps track of BloomFilterLocks owned by the current thread. This is to prevent recursive locks. This is
@@ -514,7 +519,7 @@ namespace bloomfilter_lock
             m_locks(16)
         {}
     
-        void track(BloomFilterLock* lock)
+        void track(BloomFilterLock<T>* lock)
         {
             for (auto n = 0; n < m_count; ++n)
             {
@@ -533,7 +538,8 @@ namespace bloomfilter_lock
             }
         }
         
-        void untrack(BloomFilterLock * lock)
+        
+        void untrack(BloomFilterLock<T> * lock)
         {
             for (auto n = 0; n < m_count; ++n)
             {
@@ -553,11 +559,12 @@ namespace bloomfilter_lock
         
     private:
         // Vector of resource locks owned by this thread
-        std::vector<BloomFilterLock*> m_locks;
+        std::vector<BloomFilterLock<T>*> m_locks;
         size_t m_count; // count of resource locks currently owned. The capacity of m_locks could be greater.
     };
 
-            
+    
+    template <typename InternalLockType=std::mutex>        
     class BloomFilterLock
     {
     public:
@@ -568,6 +575,7 @@ namespace bloomfilter_lock
         ~BloomFilterLock();
         void global_read_lock();
         void global_write_lock();
+        
         template <typename T>
         void multilock(const T& reads, const T& writes);
         void multilock(const LockIntention& l);
@@ -578,7 +586,7 @@ namespace bloomfilter_lock
     private:
 
         _LockRecord *allocate_lock_record();
-        inline void wait_at_queue_front(std::unique_lock<std::mutex>& guard)
+        inline void wait_at_queue_front(std::unique_lock<InternalLockType>& guard)
         {
             _LockRecord * r = m_lock_queue.front();
             r->_latch();            
@@ -597,7 +605,7 @@ namespace bloomfilter_lock
             r->wait();            
         }
 
-        inline void wait_at_queue_back(std::unique_lock<std::mutex>& guard, _LockRecord * new_record)
+        inline void wait_at_queue_back(std::unique_lock<InternalLockType>& guard, _LockRecord * new_record)
         {
             new_record->_latch();
             m_lock_queue.push(new_record);
@@ -606,7 +614,7 @@ namespace bloomfilter_lock
             
         }
         
-        inline void wait_at_queue_back(std::unique_lock<std::mutex>& guard)
+        inline void wait_at_queue_back(std::unique_lock<InternalLockType>& guard)
         {
             auto queue_back = m_lock_queue.back();
             queue_back->_latch();
@@ -620,13 +628,12 @@ namespace bloomfilter_lock
          * via the resource_lock scheme.  An exception results if that occurs.  Consider a set of item Keys
          * which can all be locked collectively via their controlling Key instead in that case.
          */
-        static thread_local _TLResourceTracker tl_existing_locks;
+        static thread_local _TLResourceTracker<InternalLockType> tl_existing_locks;
 
         _LockRecord* m_active_lock_record;
         std::vector<_LockRecord*> m_record_pool;
         std::queue<_LockRecord*> m_lock_queue;
-        std::mutex m_mutex; // For locking recordPool and internal structures.
-        _SpinLock m_active_lock_spinlock; // Apparently needed to establish causality for valgrind
+        InternalLockType m_mutex; // For locking recordPool and internal structures.
         bool m_closing; // Set to true during the destructor sequence.        
     };
 }

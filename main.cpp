@@ -16,15 +16,18 @@
 typedef std::chrono::high_resolution_clock::time_point hres_t;
 typedef std::chrono::duration<size_t, std::ratio<1, 1000000>> duration_t; // micro-seconds.
 
+//using BloomFilterLock = bloomfilter_lock::BloomFilterLock<std::mutex>;
+using BloomFilterLock = bloomfilter_lock::BloomFilterLock<bloomfilter_lock::_SpinLock>;
+
 struct task
 {
 
     std::mutex& m_mutex;
     std::condition_variable& m_cv;
     bool& m_run;
-    bloomfilter_lock::BloomFilterLock& m_bloomfilter_lock;
+    BloomFilterLock& m_bloomfilter_lock;
 
-    task(bloomfilter_lock::BloomFilterLock& lock, std::mutex& m, std::condition_variable& v, bool& run_var):
+    task(BloomFilterLock& lock, std::mutex& m, std::condition_variable& v, bool& run_var):
         m_mutex(m),
         m_cv(v),
         m_run(run_var),
@@ -57,7 +60,7 @@ struct task
 
         l.unlock();
 
-        size_t count = 200000;
+        size_t count = 500000;
         hres_t vi_start = std::chrono::high_resolution_clock::now ();
 
         for (auto i = 0; i < count; ++i)
@@ -81,7 +84,7 @@ struct task
 
 int main()
 {
-    bloomfilter_lock::BloomFilterLock l;
+    BloomFilterLock l;
     auto num_cores = std::thread::hardware_concurrency();
     
     size_t concurrency = num_cores > 2 ? num_cores - 1 : num_cores;

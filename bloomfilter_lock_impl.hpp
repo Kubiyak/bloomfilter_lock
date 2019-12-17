@@ -50,8 +50,9 @@ namespace bloomfilter_lock
         return merge_lock_request(LockIntention({id}, {id}));
     }
 
-        
-    BloomFilterLock::BloomFilterLock():
+
+    template <typename T>
+    BloomFilterLock<T>::BloomFilterLock():
         m_active_lock_record(nullptr)
     {
         for (auto i = 0; i < 7; i++)
@@ -62,9 +63,10 @@ namespace bloomfilter_lock
     }
 
 
-    BloomFilterLock::~BloomFilterLock()
+    template <typename T>
+    BloomFilterLock<T>::~BloomFilterLock()
     {
-        std::unique_lock<std::mutex> guard(m_mutex);
+        std::unique_lock<T> guard(m_mutex);
         if (m_closing)
         {
             // Double destructor call?
@@ -94,8 +96,9 @@ namespace bloomfilter_lock
             delete r;
     }
 
-
-    _LockRecord* BloomFilterLock::allocate_lock_record()
+    
+    template <typename T>
+    _LockRecord* BloomFilterLock<T>::allocate_lock_record()
     {
         // m_mutex must be held when calling this.
         _LockRecord *result = 0;
@@ -112,11 +115,12 @@ namespace bloomfilter_lock
     }
 
 
-    void BloomFilterLock::global_read_lock()
+    template <typename T>
+    void BloomFilterLock<T>::global_read_lock()
     {
         
         tl_existing_locks.track(this);        
-        std::unique_lock<std::mutex> lock(m_mutex);
+        std::unique_lock<T> lock(m_mutex);
         
         // Attempt to merge in a read request into the head of the lock queue.
         if (m_lock_queue.front()->global_read_request())
@@ -139,10 +143,11 @@ namespace bloomfilter_lock
     }
 
 
-    void BloomFilterLock::global_write_lock()
+    template <typename T>
+    void BloomFilterLock<T>::global_write_lock()
     {
         tl_existing_locks.track(this);
-        std::unique_lock<std::mutex> lock(m_mutex);
+        std::unique_lock<T> lock(m_mutex);
 
         if (m_lock_queue.front()->global_write_request())
         {
@@ -156,17 +161,19 @@ namespace bloomfilter_lock
     }
 
 
-    template<typename T>
-    void BloomFilterLock::multilock(const T& reads, const T& writes)
+    template <typename LockType>
+    template <typename T>
+    void BloomFilterLock<LockType>::multilock(const T& reads, const T& writes)
     {
         multilock(LockIntention(reads, writes));   
     }
 
     
-    void BloomFilterLock::multilock(const LockIntention& l)
+    template <typename LockType>
+    void BloomFilterLock<LockType>::multilock(const LockIntention& l)
     {
         tl_existing_locks.track(this);
-        std::unique_lock<std::mutex> lock(m_mutex);
+        std::unique_lock<LockType> lock(m_mutex);
         if (m_lock_queue.front()->merge_lock_request(l))
         {
             wait_at_queue_front(lock);
@@ -179,11 +186,12 @@ namespace bloomfilter_lock
     }
     
     
-    void BloomFilterLock::read_lock(Key resource_id)
+    template <typename T>
+    void BloomFilterLock<T>::read_lock(Key resource_id)
     {
         tl_existing_locks.track(this);
 
-        std::unique_lock<std::mutex> lock(m_mutex);
+        std::unique_lock<T> lock(m_mutex);
         if (m_lock_queue.front()->merge_read_lock_request(resource_id))
         {
             wait_at_queue_front(lock);
@@ -196,11 +204,12 @@ namespace bloomfilter_lock
     }
 
 
-    void BloomFilterLock::write_lock(Key resource_id)
+    template <typename T>
+    void BloomFilterLock<T>::write_lock(Key resource_id)
     {
         tl_existing_locks.track(this);
 
-        std::unique_lock<std::mutex> lock(m_mutex);
+        std::unique_lock<T> lock(m_mutex);
         if (m_lock_queue.front()->merge_write_lock_request(resource_id))
         {
             wait_at_queue_front(lock);
@@ -212,7 +221,8 @@ namespace bloomfilter_lock
     }
 
 
-    void BloomFilterLock::unlock()
+    template <typename T>
+    void BloomFilterLock<T>::unlock()
     {        
         tl_existing_locks.untrack(this);
         
@@ -220,26 +230,20 @@ namespace bloomfilter_lock
         // update to m_active_lock_record in a previous unlock op w/o
         // this spinlock. From my understanding of happens-before, it should
         // not strictly be necessary as happens-before for this is established
-        // by the spinlock held in the activate call itself.
-        std::unique_lock<_SpinLock> record_lock(m_active_lock_spinlock);
-        auto released_lock_record = m_active_lock_record;
-        record_lock.unlock();
+        // by the spinlock held in the activate call itself.        
+        auto released_lock_record = m_active_lock_record;        
         
         if (released_lock_record->release())
         {
             // This thread is responsible for clearing the lock record and activating the next one.                 
             released_lock_record->clear();                                        
-            std::unique_lock<std::mutex> guard(m_mutex);
+            std::unique_lock<T> guard(m_mutex);
             m_active_lock_record = 0;
             if (m_lock_queue.front()->record_type() != _LockRecord::None)
             {
                 auto lock_record = m_lock_queue.front();
                 m_lock_queue.pop();      
-                {                    
-                    record_lock.lock();
-                    m_active_lock_record = lock_record;
-                    record_lock.unlock();
-                }
+                m_active_lock_record = lock_record;                                    
                 lock_record->activate();
             }
 
@@ -250,5 +254,7 @@ namespace bloomfilter_lock
         }
     }
 
-    thread_local _TLResourceTracker BloomFilterLock::tl_existing_locks;
+    
+    template <typename T>
+    thread_local _TLResourceTracker<T> BloomFilterLock<T>::tl_existing_locks;
 }
